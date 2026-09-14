@@ -54,6 +54,12 @@ def analysis_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dst = tmp_path / "state"
     shutil.copytree(src, dst)
     monkeypatch.setenv("CARTWHEEL_ANALYSIS_STATE", str(dst))
+    # Earlier tests import the agent CLI, which loads .env into os.environ.
+    # Drop the Langfuse variables so the helpers take the committed-JSON path
+    # instead of reaching a live instance; tests that need the live branch
+    # patch `langfuse_io.is_configured` explicitly.
+    for name in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST"):
+        monkeypatch.delenv(name, raising=False)
     return dst
 
 

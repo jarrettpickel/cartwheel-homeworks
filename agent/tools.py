@@ -20,10 +20,16 @@ from __future__ import annotations
 
 from typing import Any
 
+import agent
 from agent import db
 from agent.auth import AuthContext, can_cancel_order, permission_denied
+from agent.db import Product
 from agent.helpcenter import load_policy_docs
 from agent.killswitch import kill_switch
+
+from thefuzz import fuzz
+
+from optimize.workflow import now_utc
 
 MAX_SEARCH_LIMIT = 25
 DEFAULT_ORDER_LIMIT = 20
@@ -53,7 +59,111 @@ def get_policy(ctx: AuthContext, policy_id: str) -> dict[str, Any]:
         agent.helpcenter.load_policy_docs() returns every parsed doc.
     """
     ### YOUR CODE HERE (HW1)
-    raise NotImplementedError("HW1: implement get_policy")
+    policy_docs = load_policy_docs()
+    result = {
+        "ok": False,
+        "error": "not_found",
+        "reason": f"Policy document not found for ID '{policy_id}'",
+    }
+    policy_doc = None
+    for p_d in policy_docs:
+        if p_d.policy_id == policy_id:
+            policy_doc = p_d
+            break
+    if policy_doc:
+        result = {
+            "ok": True,
+            "policy_id": policy_id,
+            "title": policy_doc.title,
+            "audience": policy_doc.audience,
+            "body": policy_doc.body,
+        }
+    return result
+
+
+def search_products_early_return(max_price_usd: float, query):
+    if max_price_usd and (float(max_price_usd) and max_price_usd <= 0):
+        return {
+            "ok": False,
+            "error": "invalid_argument",
+            "reason": f"max_price_usd must be a positive float value. max_price_usd supplied was '{max_price_usd}'."
+        }
+    if len(query.strip()) < 1:
+        return {
+            "ok": False,
+            "error": "invalid_argument",
+            "reason": f"query must be a non-empty string (must not be empty or only contain whitespace). query supplied was '{query}'. query stripped of whitespace was '{query.strip()}'"
+        }
+    return None
+
+
+def search_products_get_products(conn, store):
+    chosen_store = None
+    products: list[Product] = []
+    if store:
+        chosen_store = db.get_store_by_name(conn=conn, name=store)
+        if not chosen_store:
+            return {
+                "ok": False,
+                "error": "not_found",
+                "reason": f"store not found by provided value '{store}'.",
+            }
+    if chosen_store:
+        products = db.list_products(conn=conn, store_id=chosen_store.id)
+    else:
+        products = db.list_products(conn=conn)
+    return products
+
+
+def search_products_sort_products(in_products):
+    sort_key = lambda p: (p.price_usd, p.id)
+    in_products.sort(key=sort_key)
+    return in_products
+
+
+def search_products_filter_by_max_price(in_products, max_price_usd):
+    if max_price_usd:
+        filtered_products: list[Product] = []
+        for product in in_products:
+            if product.price_cents <= max_price_usd:
+                filtered_products.append(product)
+        in_products = filtered_products
+    return in_products
+
+
+def find_query_parts_in_product(query_parts, product):
+    found_all_query_parts = True
+    lower_title = product.title.lower()
+    lower_desc = product.description.lower()
+    for q_p in query_parts:
+        lqp = q_p.lower()
+        found_lqp = (lqp in lower_title) or (lqp in lower_desc)
+        if not found_lqp:
+            found_all_query_parts = False
+            break
+    return found_all_query_parts
+
+
+def search_products_filter_by_query(in_products, query):
+    filtered_products: list[Product] = []
+    query_parts: list[str] = query.split()
+    for product in in_products:
+        found_all_query_parts = find_query_parts_in_product(query_parts, product)
+        if found_all_query_parts:
+            filtered_products.append(product)
+    return filtered_products
+
+
+def build_products_to_return(in_products):
+    products_to_return = []
+    for l_p in in_products:
+        products_to_return.append({
+            "product_id": l_p.id,
+            "store_id": l_p.store_id,
+            "title": l_p.title,
+            "price_usd": l_p.price_usd,
+        })
+    return products_to_return
 
 
 def search_products(
@@ -95,8 +205,37 @@ def search_products(
         agent.db.list_products(conn, store_id) gives the candidate set.
         Use `with db.connection() as conn:` to close the database automatically.
     """
-    ### YOUR CODE HERE (HW1)
-    raise NotImplementedError("HW1: implement search_products")
+    er = search_products_early_return(max_price_usd, query)
+    if er:
+        return er
+
+    conn = db.connect()
+
+    # Get Products
+    products = search_products_get_products(conn, store)
+    if isinstance(products, dict):  # Not actually a product, but a error dict
+        return products
+
+    # Sort products by price
+    products = search_products_sort_products(products)
+
+    # Filter products by inclusive max price
+    products = search_products_filter_by_max_price(products, max_price_usd)
+
+    # Filter products by query
+    products = search_products_filter_by_query(products, query)
+
+    # Limit the number of products returned
+    limited_products = products[:min(max(limit, 1), MAX_SEARCH_LIMIT)]
+
+    # Build products portion of response
+    products_to_return = build_products_to_return(limited_products)
+
+    return {
+        "ok": True,
+        "products": products_to_return,
+        "count": len(limited_products)
+    }
 
 
 def list_my_orders(ctx: AuthContext) -> dict[str, Any]:
@@ -122,7 +261,26 @@ def list_my_orders(ctx: AuthContext) -> dict[str, Any]:
         tool: the model cannot ask for someone else's orders through it.
     """
     ### YOUR CODE HERE (HW1)
-    raise NotImplementedError("HW1: implement list_my_orders")
+    context_role = ctx.role.lower()
+    conn = db.connect()
+    my_orders = []
+    if context_role == "shopper":
+        my_orders = db.list_orders_for_user(conn, ctx.user_id)
+    elif context_role == "merchant":
+        if ctx.store_id:
+            my_orders = db.list_orders_for_store(conn, ctx.store_id)
+    else:
+        return {
+            "ok": False,
+            "error": "invalid_argument",
+            "reason": "Unable to return orders for support staff",
+        }
+    orders_to_return = [m_o.to_public_dict() for m_o in my_orders]
+    return {
+        "ok": True,
+        "orders": orders_to_return,
+        "count": len(orders_to_return),
+    }
 
 
 def cancel_order(ctx: AuthContext, order_id: int, reason: str) -> dict[str, Any]:
@@ -168,7 +326,50 @@ def cancel_order(ctx: AuthContext, order_id: int, reason: str) -> dict[str, Any]
     if paused is not None:
         return {"ok": False, "error": "paused", "reason": paused}
     ### YOUR CODE HERE (HW1)
-    raise NotImplementedError("HW1: implement cancel_order")
+    conn = db.connect()
+    order = db.get_order(conn, order_id=order_id)
+    can_cancel = agent.auth.can_cancel_order(
+        ctx=ctx,
+        order_user_id=order.user_id,
+        order_store_id=order.store_id,
+    )
+    if not can_cancel:
+        if ctx.role == "shopper":
+            if ctx.user_id != order.user_id:
+                return {
+                    "ok": False,
+                    "error": "permission_denied",
+                    "reason": "User attempting to cancel the order is not the user attached to the order.",
+                }
+        elif ctx.role == "merchant":
+            if ctx.store_id != order.store_id:
+                return {
+                    "ok": False,
+                    "error": "permission_denied",
+                    "reason": "Merchant attempting to cancel the order is not the merchant attached to the order.",
+                }
+        elif ctx.role == "support":
+            pass
+        else:
+            return {
+                "ok": False,
+                "error": "not_eligible",
+                "reason": "Role must be one of 'shopper', 'merchant', or 'support'.",
+            }
+    if order.status != "placed":
+        return {
+            "ok": False,
+            "error": "not_eligible",
+            "reason": "Orders can only be cancelled before they are shipped",
+        }
+
+    db.insert_refund(conn, order_id=order_id, amount_cents=order.total_cents, reason="cancelled", status="auto_approved", created_at=now_utc())
+
+    return {
+        "ok": True,
+        "order_id": order_id,
+        "status": "cancelled",
+    }
 
 
 def find_order(ctx: AuthContext, query: str) -> dict[str, Any]:
@@ -203,4 +404,60 @@ def find_order(ctx: AuthContext, query: str) -> dict[str, Any]:
         match, return {"ok": True, "orders": []}.
     """
     ### YOUR CODE HERE (HW1)
+
+    # Get Orders by Role
+    conn = db.connect()
+    orders = []
+    if ctx.role == "shopper":
+        orders = db.list_order_search_candidates(conn, user_id=ctx.user_id)
+    elif ctx.role == "merchant":
+        orders = db.list_order_search_candidates(conn, store_id=ctx.store_id)
+    elif ctx.role == "support":
+        orders = db.list_order_search_candidates(conn, all_orders=True)
+    else:
+        return {
+            "ok": False,
+            "error": "unsupported_role",
+            "reason": "Role must be one of 'shopper', 'merchant', or 'support'.",
+        }
+
+    # Get Products
+    all_products = []
+    if ctx.role in ("shopper", "support"):
+        all_products = db.list_products(conn)
+    elif ctx.role == "merchant":
+        all_products = db.list_products(conn, store_id=ctx.store_id)
+
+    # Match Products in Orders to Products ?
+    products_in_orders: list[Product] = []
+    o_p_ids = []
+    for o in orders:
+        if o.product_id not in o_p_ids:
+            o_p_ids.append(o.product_id)
+    for p in all_products:
+        if p.id in o_p_ids and len(products_in_orders) < len(o_p_ids):
+            products_in_orders.append(p)
+
+    # Identify Matching Products
+    matching_products = []
+    for p in products_in_orders:
+        is_a_match = fuzz.partial_ratio(p.title, query) > 80
+        if is_a_match:
+            matching_products.append(p)
+
+    orders_result = []
+    for o in orders:
+        for m_p in matching_products:
+            if o.product_id == m_p.id:
+                orders_result.append(o.to_public_dict())
+                if len(orders_result) > 4:
+                    break
+        if len(orders_result) > 4:
+            break
+
+    return {
+        "ok": True,
+        "orders": orders_result,
+    }
+
     raise NotImplementedError("HW1: implement find_order")
