@@ -328,14 +328,23 @@ def cancel_order(ctx: AuthContext, order_id: int, reason: str) -> dict[str, Any]
     ### YOUR CODE HERE (HW1)
     conn = db.connect()
     order = db.get_order(conn, order_id=order_id)
+    if not order:
+        return {
+            "ok": False,
+            "error": "not_found",
+            "reason": f"Unable to find order with order id provided",
+        }
     can_cancel = agent.auth.can_cancel_order(
         ctx=ctx,
         order_user_id=order.user_id,
         order_store_id=order.store_id,
     )
     if not can_cancel:
+        return agent.auth.permission_denied(f"{ctx.role} attempted to cancel order {order_id}")
+        """
         if ctx.role == "shopper":
             if ctx.user_id != order.user_id:
+                return agent.auth.permission_denied("Shopper attempting to cancel order")
                 return {
                     "ok": False,
                     "error": "permission_denied",
@@ -356,6 +365,7 @@ def cancel_order(ctx: AuthContext, order_id: int, reason: str) -> dict[str, Any]
                 "error": "not_eligible",
                 "reason": "Role must be one of 'shopper', 'merchant', or 'support'.",
             }
+        """
     if order.status != "placed":
         return {
             "ok": False,
@@ -363,8 +373,9 @@ def cancel_order(ctx: AuthContext, order_id: int, reason: str) -> dict[str, Any]
             "reason": "Orders can only be cancelled before they are shipped",
         }
 
-    db.insert_refund(conn, order_id=order_id, amount_cents=order.total_cents, reason="cancelled", status="auto_approved", created_at=now_utc())
-
+    #db.
+    #db.insert_refund(conn, order_id=order_id, amount_cents=order.total_cents, reason="cancelled", status="auto_approved", created_at=now_utc())
+    db.set_order_status(conn=conn, order_id=order_id, status="cancelled")
     return {
         "ok": True,
         "order_id": order_id,
