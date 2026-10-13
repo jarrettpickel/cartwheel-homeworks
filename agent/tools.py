@@ -103,6 +103,7 @@ def search_products_get_products(conn, store):
     if store:
         chosen_store = db.get_store_by_name(conn=conn, name=store)
         if not chosen_store:
+            conn.close()
             return {
                 "ok": False,
                 "error": "not_found",
@@ -112,6 +113,7 @@ def search_products_get_products(conn, store):
         products = db.list_products(conn=conn, store_id=chosen_store.id)
     else:
         products = db.list_products(conn=conn)
+    conn.close()
     return products
 
 
@@ -231,6 +233,7 @@ def search_products(
     # Build products portion of response
     products_to_return = build_products_to_return(limited_products)
 
+    conn.close()
     return {
         "ok": True,
         "products": products_to_return,
@@ -266,10 +269,13 @@ def list_my_orders(ctx: AuthContext) -> dict[str, Any]:
     my_orders = []
     if context_role == "shopper":
         my_orders = db.list_orders_for_user(conn, ctx.user_id)
+        conn.close()
     elif context_role == "merchant":
         if ctx.store_id:
             my_orders = db.list_orders_for_store(conn, ctx.store_id)
+        conn.close()
     else:
+        conn.close()
         return {
             "ok": False,
             "error": "invalid_argument",
@@ -329,6 +335,7 @@ def cancel_order(ctx: AuthContext, order_id: int, reason: str) -> dict[str, Any]
     conn = db.connect()
     order = db.get_order(conn, order_id=order_id)
     if not order:
+        conn.close()
         return {
             "ok": False,
             "error": "not_found",
@@ -340,42 +347,18 @@ def cancel_order(ctx: AuthContext, order_id: int, reason: str) -> dict[str, Any]
         order_store_id=order.store_id,
     )
     if not can_cancel:
+        conn.close()
         return agent.auth.permission_denied(f"{ctx.role} attempted to cancel order {order_id}")
-        """
-        if ctx.role == "shopper":
-            if ctx.user_id != order.user_id:
-                return agent.auth.permission_denied("Shopper attempting to cancel order")
-                return {
-                    "ok": False,
-                    "error": "permission_denied",
-                    "reason": "User attempting to cancel the order is not the user attached to the order.",
-                }
-        elif ctx.role == "merchant":
-            if ctx.store_id != order.store_id:
-                return {
-                    "ok": False,
-                    "error": "permission_denied",
-                    "reason": "Merchant attempting to cancel the order is not the merchant attached to the order.",
-                }
-        elif ctx.role == "support":
-            pass
-        else:
-            return {
-                "ok": False,
-                "error": "not_eligible",
-                "reason": "Role must be one of 'shopper', 'merchant', or 'support'.",
-            }
-        """
     if order.status != "placed":
+        conn.close()
         return {
             "ok": False,
             "error": "not_eligible",
             "reason": "Orders can only be cancelled before they are shipped",
         }
 
-    #db.
-    #db.insert_refund(conn, order_id=order_id, amount_cents=order.total_cents, reason="cancelled", status="auto_approved", created_at=now_utc())
     db.set_order_status(conn=conn, order_id=order_id, status="cancelled")
+    conn.close()
     return {
         "ok": True,
         "order_id": order_id,
@@ -426,6 +409,7 @@ def find_order(ctx: AuthContext, query: str) -> dict[str, Any]:
     elif ctx.role == "support":
         orders = db.list_order_search_candidates(conn, all_orders=True)
     else:
+        conn.close()
         return {
             "ok": False,
             "error": "unsupported_role",
@@ -438,6 +422,7 @@ def find_order(ctx: AuthContext, query: str) -> dict[str, Any]:
         all_products = db.list_products(conn)
     elif ctx.role == "merchant":
         all_products = db.list_products(conn, store_id=ctx.store_id)
+    conn.close()
 
     # Match Products in Orders to Products ?
     products_in_orders: list[Product] = []
@@ -471,4 +456,63 @@ def find_order(ctx: AuthContext, query: str) -> dict[str, Any]:
         "orders": orders_result,
     }
 
-    raise NotImplementedError("HW1: implement find_order")
+
+def get_product(
+        ctx: AuthContext,
+        product_id: int,
+        store: str | None = None,
+) -> dict[str, Any]:
+    """Search the list of products by product ID. Risk tier: read.
+
+    All roles may search for product information by product ID.
+
+    Args:
+        ctx: The caller's auth context.
+        product_id: The ID of the product to look up.
+        store: Optional store filter. Matched with
+            agent.db.get_store_by_name (case-insensitive name or slug). If
+            given and no store matches, return {"ok": False, "error":
+            "not_found", "reason": ...} naming the store string.
+
+    Returns:
+        {"ok": True, "product_name": "", "product_price": float} when a product
+        is found by its ID. No match is still a
+        success: {"ok": True, "product_name": None, "product_price": None}
+    """
+    conn = db.connect()
+    chosen_store = None
+    if store:
+        chosen_store = db.get_store_by_name(conn=conn, name=store)
+        if not chosen_store:
+            conn.close()
+            return {
+                "ok": False,
+                "error": "not_found",
+                "reason": f"store not found by provided value '{store}'.",
+            }
+    if chosen_store:
+        products = db.list_products(conn=conn, store_id=chosen_store.id)
+    else:
+        products = db.list_products(conn=conn)
+    conn.close()
+    found_product = False
+    product_name = None
+    product_price = None
+    for product in products:
+        if product.id == product_id:
+            product_name = product.title
+            product_price = product.price_usd
+            found_product = True
+            break
+    if found_product:
+        return {
+            "ok": True,
+            "product_name": product_name,
+            "product_price": product_price,
+        }
+    else:
+        return {
+            "ok": True,
+            "product_name": None,
+            "product_price": None,
+        }

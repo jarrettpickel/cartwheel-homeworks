@@ -71,6 +71,8 @@ provide any additional information or alternatives.
 - Cite the policy id (for example cw-returns) for every policy claim.
 - Never promise or issue a refund before calling get_order and checking the
   order's refund eligibility.
+- Order results contain only product_id. When the user asks what they
+  bought, call get_product for each order to give the product name.
 
 ## Escalation
 When you are unsure, or an action is above your authority (for example a
@@ -428,6 +430,16 @@ def find_order(
     return _call(wrapper, hw_tools.find_order, query)
 
 
+@function_tool
+def get_product(
+        wrapper: RunContextWrapper[AuthContext],
+        product_id: int,
+        store: str | None = None,
+) -> dict[str, Any]:
+    """Look up a product's name and price by product ID. Order results only include product_id, so call this to tell the user what they bought."""
+    return _call(wrapper, hw_tools.get_product, product_id, store)
+
+
 # Progressive disclosure: a session exposes only the tools its role can use.
 # Fewer tools mean fewer wrong choices and cleaner evals. At dev scale the
 # only difference is that support staff, who have no orders of their own,
@@ -440,6 +452,7 @@ _COMMON_TOOLS = [
     issue_refund,
     cancel_order,
     escalate_to_human,
+    get_product,
 ]
 TOOLS_BY_ROLE = {
     "shopper": _COMMON_TOOLS + [list_my_orders, find_order],
